@@ -1,0 +1,372 @@
+/************************************************************
+   SMART FARMING SYSTEM
+   ESP32 + Blynk IoT + OLED + Sensors + 2 Relay Control
+
+   ----------------------------------------------------------
+   BLYNK VIRTUAL PINS
+   ----------------------------------------------------------
+   V0  -> Soil Moisture Sensor 1
+   V1  -> Soil Moisture Sensor 2
+   V2  -> Temperature (°C)
+   V3  -> Turbidity
+   V4  -> Relay 1 Manual ON/OFF (used only in MANUAL mode)
+   V5  -> Relay 2 Manual ON/OFF
+   V6  -> Relay 1 Mode Selection
+          0 = AUTO MODE
+          1 = MANUAL MODE
+
+   ----------------------------------------------------------
+   RELAY 1 AUTO LOGIC
+   ----------------------------------------------------------
+   AUTO MODE (V6 = 0):
+     - If soil1 > 4000 AND soil2 > 4000 -> Relay 1 ON
+     - If soil1 < 2000 OR  soil2 < 2000 -> Relay 1 OFF
+     - Otherwise keep previous state
+
+   MANUAL MODE (V6 = 1):
+     - Relay 1 controlled by Blynk switch V4
+
+   RELAY 2:
+     - Controlled by Blynk switch V5
+
+   ----------------------------------------------------------
+   OLED DISPLAY
+   ----------------------------------------------------------
+   - Always displays sensor values
+   - Top-right status:
+       ✓  = WiFi + Blynk connected
+       ✗  = WiFi or Blynk disconnected
+
+   ----------------------------------------------------------
+   RELAY MODULE
+   ----------------------------------------------------------
+   Assumed ACTIVE LOW:
+     LOW  = ON
+     HIGH = OFF
+************************************************************/
+
+// ====================== BLYNK CONFIGURATION ======================
+#define BLYNK_TEMPLATE_ID   "TMPL6ndQuEgEF"
+#define BLYNK_TEMPLATE_NAME "Smart Farming"
+#define BLYNK_AUTH_TOKEN    "5Vd95_RbvNM7UgwpECTTJZUVw6A-CVX7"
+
+// ====================== WIFI CREDENTIALS ========================
+char ssid[] = "Goura's Phone";
+char pass[] = "0000000099";
+
+// ====================== LIBRARIES ===============================
+#include <WiFi.h>
+#include <BlynkSimpleEsp32.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
+
+// ====================== OLED CONFIGURATION ======================
+#define SCREEN_WIDTH   128
+#define SCREEN_HEIGHT   64
+#define OLED_ADDR     0x3C
+#define SDA_PIN         21
+#define SCL_PIN         22
+
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
+
+// ====================== SENSOR PINS =============================
+#define SOIL1_PIN       34
+#define SOIL2_PIN       35
+#define TEMP_PIN        15
+#define TURBIDITY_PIN   32
+
+// ====================== RELAY PINS ==============================
+#define RELAY1_PIN      26
+#define RELAY2_PIN      27
+
+// ====================== SOIL THRESHOLDS =========================
+#define SOIL_ON_THRESHOLD   3500
+#define SOIL_OFF_THRESHOLD  2500
+
+// ====================== DS18B20 SETUP ===========================
+OneWire oneWire(TEMP_PIN);
+DallasTemperature tempSensor(&oneWire);
+
+// ====================== TIMER ==================================
+BlynkTimer timer;
+
+// ====================== GLOBAL VARIABLES ========================
+int soil1 = 0;
+int soil2 = 0;
+int turbidity = 0;
+float temperature = 0.0;
+
+// Relay states
+bool relay1State = false;
+bool relay2State = false;
+
+// Relay 1 mode
+// false = AUTO MODE
+// true  = MANUAL MODE
+bool relay1ManualMode = false;
+
+// ===============================================================
+// RELAY CONTROL FUNCTIONS
+// ===============================================================
+void setRelay1(bool state)
+{
+  relay1State = state;
+  digitalWrite(RELAY1_PIN, state ? LOW : HIGH);   // Active LOW
+}
+
+void setRelay2(bool state)
+{
+  relay2State = state;
+  digitalWrite(RELAY2_PIN, state ? LOW : HIGH);   // Active LOW
+}
+
+// ===============================================================
+// BLYNK HANDLERS
+// ===============================================================
+
+// V4: Relay 1 manual ON/OFF
+BLYNK_WRITE(V4)
+{
+  if (relay1ManualMode) {
+    setRelay1(param.asInt());
+  }
+}
+
+// V5: Relay 2 manual ON/OFF
+BLYNK_WRITE(V5)
+{
+  setRelay2(param.asInt());
+}
+
+// V6: Relay 1 mode selection
+// 0 = AUTO, 1 = MANUAL
+BLYNK_WRITE(V6)
+{
+  relay1ManualMode = param.asInt();
+
+  // If switching to AUTO, immediately apply automatic logic
+  if (!relay1ManualMode) {
+    // Auto mode
+    if (soil1 > SOIL_ON_THRESHOLD && soil2 > SOIL_ON_THRESHOLD) {
+      setRelay1(true);
+    }
+    else if (soil1 < SOIL_OFF_THRESHOLD || soil2 < SOIL_OFF_THRESHOLD) {
+      setRelay1(false);
+    }
+  }
+}
+
+// ===============================================================
+// READ ALL SENSORS
+// ===============================================================
+void readSensors()
+{
+  soil1 = analogRead(SOIL1_PIN);
+  soil2 = analogRead(SOIL2_PIN);
+  turbidity = analogRead(TURBIDITY_PIN);
+
+  tempSensor.requestTemperatures();
+  temperature = tempSensor.getTempCByIndex(0);
+
+  if (temperature == DEVICE_DISCONNECTED_C) {
+    temperature = 0.0;
+  }
+
+  // Serial output
+  Serial.print("S1: ");
+  Serial.print(soil1);
+  Serial.print(" | S2: ");
+  Serial.print(soil2);
+  Serial.print(" | Temp: ");
+  Serial.print(temperature);
+  Serial.print(" C | Turb: ");
+  Serial.print(turbidity);
+  Serial.print(" | R1: ");
+  Serial.print(relay1State ? "ON" : "OFF");
+  Serial.print(" | Mode: ");
+  Serial.print(relay1ManualMode ? "MANUAL" : "AUTO");
+  Serial.print(" | R2: ");
+  Serial.println(relay2State ? "ON" : "OFF");
+}
+
+// ===============================================================
+// AUTOMATIC CONTROL FOR RELAY 1
+// ===============================================================
+void autoControlRelay1()
+{
+  if (relay1ManualMode) return;   // Skip in manual mode
+
+  if (soil1 > SOIL_ON_THRESHOLD && soil2 > SOIL_ON_THRESHOLD) {
+    setRelay1(true);
+  }
+  else if (soil1 < SOIL_OFF_THRESHOLD || soil2 < SOIL_OFF_THRESHOLD) {
+    setRelay1(false);
+  }
+  // Otherwise keep previous state
+}
+
+// ===============================================================
+// SEND DATA TO BLYNK
+// ===============================================================
+void sendToBlynk()
+{
+  if (!Blynk.connected()) return;
+
+  // Sensor values
+  Blynk.virtualWrite(V0, soil1);
+  Blynk.virtualWrite(V1, soil2);
+  Blynk.virtualWrite(V2, temperature);
+  Blynk.virtualWrite(V3, turbidity);
+
+  // Relay states
+  Blynk.virtualWrite(V4, relay1State ? 1 : 0);
+  Blynk.virtualWrite(V5, relay2State ? 1 : 0);
+
+  // Mode state
+  Blynk.virtualWrite(V6, relay1ManualMode ? 1 : 0);
+}
+
+// ===============================================================
+// DRAW CONNECTION STATUS (Tick/Cross)
+// ===============================================================
+void drawConnectionStatus()
+{
+  bool connected =
+    (WiFi.status() == WL_CONNECTED) &&
+    Blynk.connected();
+
+  if (connected) {
+    // Tick mark
+    display.drawLine(116, 6, 119, 9, WHITE);
+    display.drawLine(119, 9, 125, 3, WHITE);
+  } else {
+    // Cross mark
+    display.drawLine(117, 3, 125, 11, WHITE);
+    display.drawLine(125, 3, 117, 11, WHITE);
+  }
+}
+
+// ===============================================================
+// UPDATE OLED DISPLAY
+// ===============================================================
+void updateOLED()
+{
+  display.clearDisplay();
+  display.setTextColor(WHITE);
+  display.setTextSize(1);
+
+  display.setCursor(0, 0);
+  display.print("S1:");
+  display.print(soil1);
+
+  display.setCursor(0, 16);
+  display.print("S2:");
+  display.print(soil2);
+
+  display.setCursor(0, 32);
+  display.print("T:");
+  display.print(temperature, 1);
+  display.print("C");
+
+  display.setCursor(0, 48);
+  display.print("Tb:");
+  display.print(turbidity);
+
+  drawConnectionStatus();
+  display.display();
+}
+
+// ===============================================================
+// RECONNECT WIFI AND BLYNK
+// ===============================================================
+void reconnectWiFiAndBlynk()
+{
+  if (WiFi.status() != WL_CONNECTED) {
+    WiFi.disconnect();
+    WiFi.begin(ssid, pass);
+  }
+
+  if (WiFi.status() == WL_CONNECTED && !Blynk.connected()) {
+    Blynk.connect(5000);   // Try for 5 seconds
+  }
+}
+
+// ===============================================================
+// MAIN TASK
+// ===============================================================
+void mainTask()
+{
+  readSensors();
+  autoControlRelay1();
+  sendToBlynk();
+  updateOLED();
+  reconnectWiFiAndBlynk();
+}
+
+// ===============================================================
+// SETUP
+// ===============================================================
+void setup()
+{
+  Serial.begin(115200);
+
+  // Relay pins
+  pinMode(RELAY1_PIN, OUTPUT);
+  pinMode(RELAY2_PIN, OUTPUT);
+
+  // Turn relays OFF initially
+  digitalWrite(RELAY1_PIN, HIGH);
+  digitalWrite(RELAY2_PIN, HIGH);
+
+  // ADC resolution
+  analogReadResolution(12);
+
+  // OLED
+  Wire.begin(SDA_PIN, SCL_PIN);
+
+  if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
+    Serial.println("OLED initialization failed!");
+    while (true);
+  }
+
+  // Welcome screen
+  display.clearDisplay();
+  display.setTextSize(2);
+  display.setTextColor(WHITE);
+  display.setCursor(5, 20);
+  display.println("SMART");
+  display.setCursor(5, 42);
+  display.println("FARMING");
+  display.display();
+  delay(2000);
+
+  // Temperature sensor
+  tempSensor.begin();
+
+  // WiFi
+  WiFi.begin(ssid, pass);
+
+  // Blynk (non-blocking)
+  Blynk.config(BLYNK_AUTH_TOKEN);
+
+  // Update every 2 seconds
+  timer.setInterval(2000L, mainTask);
+
+  // Initial run
+  mainTask();
+}
+
+// ===============================================================
+// LOOP
+// ===============================================================
+void loop()
+{
+  if (WiFi.status() == WL_CONNECTED) {
+    Blynk.run();
+  }
+
+  timer.run();
+}
